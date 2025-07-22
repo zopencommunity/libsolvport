@@ -1,0 +1,77 @@
+diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
+index a117a58..fb97519 100644
+--- a/ext/solv_xfopen.c
++++ b/ext/solv_xfopen.c
+@@ -958,6 +958,32 @@ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+ 
+ #else
+ 
++FILE *fmemopen(void *buf, size_t size, const char *mode) {
++    char template[] = "/tmp/zmemXXXXXX";  // mkstemp-compatible
++    int fd = mkstemp(template);
++    if (fd == -1)
++        return NULL;
++
++    // Unlink so it is deleted after close
++    unlink(template);
++
++    FILE *fp = fdopen(fd, "w+b");
++    if (!fp) {
++        close(fd);
++        return NULL;
++    }
++
++    if (buf && size && (strchr(mode, 'r') || strchr(mode, '+'))) {
++        if (fwrite(buf, 1, size, fp) != size) {
++            fclose(fp);
++            return NULL;
++        }
++        rewind(fp);
++    }
++
++    return fp;
++}
++
+ FILE *
+ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+ {
+diff --git a/src/poolvendor.c b/src/poolvendor.c
+index 83ee15b..ac0c00e 100644
+--- a/src/poolvendor.c
++++ b/src/poolvendor.c
+@@ -65,7 +65,8 @@ Id pool_vendor2mask(Pool *pool, Id vendor)
+ 	    break;	/* sorry, out of bits */
+ 	  m <<= 1;	/* next vendor equivalence class */
+ 	}
+-      if (fnmatch(*vs == '!' ? vs + 1 : vs, vstr, FNM_CASEFOLD) == 0)
++      // Check later
++      if (fnmatch(*vs == '!' ? vs + 1 : vs, vstr, 0) == 0)
+ 	{
+ 	  if (*vs != '!')
+ 	    mask |= m;
+diff --git a/src/repodata.c b/src/repodata.c
+index 10e7b42..15fcbaf 100644
+--- a/src/repodata.c
++++ b/src/repodata.c
+@@ -1468,7 +1468,7 @@ datamatcher_match(Datamatcher *ma, const char *str)
+       else
+ 	return !strcmp(ma->match, str + l);
+     case SEARCH_GLOB:
+-      return !fnmatch(ma->match, str, (ma->flags & SEARCH_NOCASE) ? FNM_CASEFOLD : 0);
++      return !fnmatch(ma->match, str, (ma->flags & SEARCH_NOCASE) ? 0 : 0);
+     case SEARCH_REGEX:
+       return !regexec((const regex_t *)ma->matchdata, str, 0, NULL, 0);
+     default:
+diff --git a/src/selection.c b/src/selection.c
+index a8e60f7..2ace2be 100644
+--- a/src/selection.c
++++ b/src/selection.c
+@@ -29,6 +29,8 @@
+ #include "strfncs.h"
+ #endif
+ 
++#define FNM_CASEFOLD 0
++
+ static int
+ str2archid(Pool *pool, const char *arch)
+ {
