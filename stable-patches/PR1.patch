@@ -1,0 +1,37 @@
+diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
+index a117a58..fb97519 100644
+--- a/ext/solv_xfopen.c
++++ b/ext/solv_xfopen.c
+@@ -958,6 +958,32 @@ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+ 
+ #else
+ 
++FILE *fmemopen(void *buf, size_t size, const char *mode) {
++    char template[] = "/tmp/zmemXXXXXX";  // mkstemp-compatible
++    int fd = mkstemp(template);
++    if (fd == -1)
++        return NULL;
++
++    // Unlink so it is deleted after close
++    unlink(template);
++
++    FILE *fp = fdopen(fd, "w+b");
++    if (!fp) {
++        close(fd);
++        return NULL;
++    }
++
++    if (buf && size && (strchr(mode, 'r') || strchr(mode, '+'))) {
++        if (fwrite(buf, 1, size, fp) != size) {
++            fclose(fp);
++            return NULL;
++        }
++        rewind(fp);
++    }
++
++    return fp;
++}
++
+ FILE *
+ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+ {
