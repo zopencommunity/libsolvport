@@ -1,3 +1,16 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5ba5ed5..88b5d88 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -227,7 +227,7 @@ IF (ENABLE_RPMDB OR ENABLE_RPMPKG_LIBRPM)
+   FIND_LIBRARY (RPMDB_LIBRARY NAMES rpmdb)
+ 
+   IF (NOT RPMDB_LIBRARY)
+-    FIND_LIBRARY (RPMDB_LIBRARY NAMES rpm)
++    FIND_LIBRARY (RPMDB_LIBRARY NAMES librpm)
+   ENDIF (NOT RPMDB_LIBRARY)
+ 
+   FIND_LIBRARY (RPMIO_LIBRARY NAMES rpmio)
 diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
 index a117a58..fb97519 100644
 --- a/ext/solv_xfopen.c
