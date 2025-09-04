@@ -16,7 +16,7 @@ export ZOPEN_BUILD_LINE="STABLE"
 
 ## Required IF ZOPEN_BUILD_LINE='STABLE'
 export ZOPEN_STABLE_URL="https://github.com/openSUSE/libsolv.git"  # Specify the stable build URL (either git or tarball)
-export ZOPEN_STABLE_DEPS="zoslib make cmake zlib grep gawk rpm popt sqlite lua bzip2 libgcrypt zstd libgpgerror libxml2 libiconv gettext" # Specify the stable build dependencies.
+export ZOPEN_STABLE_DEPS="zoslib make cmake zlib grep gawk rpm popt sqlite lua bzip2 xz zstd libgcrypt zstd libgpgerror libxml2 libiconv gettext" # Specify the stable build dependencies.
 
 ## Required IF ZOPEN_BUILD_LINE='DEV'
 export ZOPEN_DEV_URL=""   # Specify the dev build URL
@@ -161,7 +161,7 @@ export ZOPEN_CHECK_OPTS="-C ../build test" ## Options to pass to check program (
 #export ZOPEN_CHECK_TIMEOUT="" ## Timeout limit in seconds for the check program (defaults to '12600' # 3.5 hours)
 #export ZOPEN_CLEAN_OPTS="" ## Options to pass to clean up  program (defaults to 'clean')
 #export ZOPEN_CONFIGURE_MINIMAL="" ## Configuration program will not be passed CFLAGS, LDFLAGS, CPPFLAGS options but will get them from env vars.
-export ZOPEN_CONFIGURE_OPTS="-B ../build  --install-prefix \$ZOPEN_INSTALL_DIR/ -DBUILD_TESTING=ON -DENABLE_STATIC_INIT=ON -DCMAKE_INSTALL_PREFIX=\$ZOPEN_INSTALL_DIR/ -DZLIB_ROOT=\$ZLIB_HOME/ -DLIBXML2_LIBRARY=\$LIBXML2_HOME/lib/ -DLIBXML2_INCLUDE_DIR=\$LIBXML2_HOME/include/ -DWITHOUT_COOKIEOPEN=ON -DENABLE_STATIC=ON -DDISABLE_SHARED=ON -DENABLE_RPMDB=ON -DENABLE_RPMPKG=ON -DENABLE_RPMMD=ON -DENABLE_COMPLEX_DEPS=ON -DENABLE_COMPS=ON -DWITH_LIBXML2=ON" ## Options to pass to configuration program (defaults to '--prefix=')
+export ZOPEN_CONFIGURE_OPTS="-B ../build  --install-prefix \$ZOPEN_INSTALL_DIR/ -DBUILD_TESTING=ON -DENABLE_STATIC_INIT=ON -DCMAKE_INSTALL_PREFIX=\$ZOPEN_INSTALL_DIR/ -DZLIB_ROOT=\$ZLIB_HOME/ -DZSTD_INCLUDE_DIRS=\$ZSTD_HOME/include -DZSTD_LIBRARY=\$ZSTD_HOME/lib/libzstd.a -DBZIP2_INCLUDE_DIR=\$BZIP2_HOME/include -DBZIP2_LIBRARIES=\$BZIP2_HOME/lib/libbz2.a -DLZMA_INCLUDE_DIR=\$XZ_HOME/include -DLZMA_LIBRARY=\$XZ_HOME/lib/liblzma.a -DENABLE_LZMA_COMPRESSION=ON -DENABLE_ZLIB_COMPRESSION=ON -DENABLE_BZIP2_COMPRESSION=ON -DENABLE_ZSTD_COMPRESSION=ON -DLIBXML2_LIBRARY=\$LIBXML2_HOME/lib/libxml2.a -DLIBXML2_INCLUDE_DIR=\$LIBXML2_HOME/include/ -DENABLE_STATIC=ON -DDISABLE_SHARED=ON -DENABLE_RPMDB=ON -DENABLE_RPMPKG=ON -DENABLE_RPMMD=ON -DENABLE_COMPLEX_DEPS=ON -DENABLE_COMPS=ON -DWITH_LIBXML2=ON" ## Options to pass to configuration program (defaults to '--prefix=')
 #export ZOPEN_EXTRA_CONFIGURE_OPTS="" ## Extra configure options to pass to configuration program. (defaults to '')
 export ZOPEN_INSTALL_OPTS="-C ../build install" ## Options to pass to installation program (defaults to 'install')
 #export ZOPEN_MAKE_MINIMAL="" ## Build program will not be passed CFLAGS, LDFLAGS, CPPFLAGS options but will get them from env vars.
