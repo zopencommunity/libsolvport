@@ -1,0 +1,57 @@
+diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
+index eecbd3b..be74e6c 100644
+--- a/ext/solv_xfopen.c
++++ b/ext/solv_xfopen.c
+@@ -20,6 +20,16 @@
+ #include "solv_xfopen.h"
+ #include "util.h"
+ 
++/* binmode: return the binary-mode equivalent of a stdio open mode string.
++ * On z/OS, fopen with a text mode ("r", "w") on a file tagged ISO8859-1
++ * under AUTOCVT=ON causes unwanted byte conversion. Using "rb"/"wb" bypasses
++ * this. On Linux/macOS the "b" flag is a no-op per the C standard. */
++static const char *binmode(const char *mode) {
++  if (!strcmp(mode, "r")) return "rb";
++  if (!strcmp(mode, "w")) return "wb";
++  return mode;
++}
++
+ #ifndef WITHOUT_COOKIEOPEN
+ 
+ FILE *solv_cookieopen(void *cookie, const char *mode,
+@@ -198,7 +208,7 @@ static LZFILE *lzopen(const char *path, const char *mode, int fd, int isxz)
+   if (!path)
+     fp = fdopen(fd, encoding ? "w" : "r");
+   else
+-    fp = fopen(path, encoding ? "w" : "r");
++    fp = fopen(path, encoding ? "wb" : "rb");
+   if (!fp)
+     {
+       lzma_end(&lzfile->strm);
+@@ -398,7 +408,7 @@ static ZSTDFILE *zstdopen(const char *path, const char *mode, int fd)
+   if (!path)
+     fp = fdopen(fd, encoding ? "w" : "r");
+   else
+-    fp = fopen(path, encoding ? "w" : "r");
++    fp = fopen(path, encoding ? "wb" : "rb");
+   if (!fp)
+     {
+       if (encoding)
+@@ -606,7 +616,7 @@ static void *zchunkopen(const char *path, const char *mode, int fd)
+   if (!path)
+     fp = fdopen(fd, mode);
+   else
+-    fp = fopen(path, mode);
++    fp = fopen(path, binmode(mode));
+   if (!fp)
+     return 0;
+   f = solv_zchunk_open(fp, 1);
+@@ -725,7 +735,7 @@ solv_xfopen(const char *fn, const char *mode)
+       return 0;
+     }
+ #endif
+-  return fopen(fn, mode);
++  return fopen(fn, binmode(mode));
+ }
+ 
+ FILE *
