@@ -1,5 +1,5 @@
 diff --git a/ext/testcase.c b/ext/testcase.c
-index af05c21..303c065 100644
+index af05c21..6389e75 100644
 --- a/ext/testcase.c
 +++ b/ext/testcase.c
 @@ -24,6 +24,15 @@
@@ -18,19 +18,24 @@ index af05c21..303c065 100644
  #if ENABLE_TESTCASE_HELIXREPO
  #include "ext/repo_helix.h"
  #endif
-@@ -2239,7 +2248,10 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2239,7 +2248,15 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
        pieces[npieces] = 0;
        if (!strcmp(pieces[0], "repo") && npieces >= 4)
  	{
 -	  Repo *repo = repo_create(pool, pieces[1]);
-+	  Repo *repo = testcase_str2repo(pool, pieces[1]);
-+	  int is_extension = repo ? 1 : 0;
++	  Repo *repo = 0;
++	  int is_extension = 0;
++	  if (npieces > 4 && !strcmp(pieces[3], "filelists"))
++	    {
++	      repo = testcase_str2repo(pool, pieces[1]);
++	      is_extension = 1;
++	    }
 +	  if (!repo)
 +	    repo = repo_create(pool, pieces[1]);
  	  FILE *rfp;
  	  int prio, subprio;
  	  const char *rdata;
-@@ -2300,6 +2312,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2300,6 +2317,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
  		  repo_add_solv(repo, rfp, 0);
  		  fclose(rfp);
  		}

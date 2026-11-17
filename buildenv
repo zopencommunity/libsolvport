@@ -16,7 +16,7 @@ export ZOPEN_BUILD_LINE="STABLE"
 
 ## Required IF ZOPEN_BUILD_LINE='STABLE'
 export ZOPEN_STABLE_URL="https://github.com/openSUSE/libsolv.git"  # Specify the stable build URL (either git or tarball)
-export ZOPEN_STABLE_DEPS="zoslib make cmake zlib grep gawk rpm popt sqlite lua bzip2 libgcrypt zstd libgpgerror libxml2 libiconv gettext" # Specify the stable build dependencies.
+export ZOPEN_STABLE_DEPS="zoslib make cmake zlib gzip grep gawk rpm popt sqlite lua bzip2 libgcrypt zstd libgpgerror libxml2 libiconv gettext" # Specify the stable build dependencies.
 
 ## Required IF ZOPEN_BUILD_LINE='DEV'
 export ZOPEN_DEV_URL=""   # Specify the dev build URL
@@ -62,7 +62,7 @@ zopen_check_results()
   echo "actualFailures:$actualFailures"
   echo "totalTests:$totalTests"
   echo "expectedFailures:1"
-  echo "expectedTotalTests:29"
+  echo "expectedTotalTests:30"
 }
 
 zopen_get_version()
