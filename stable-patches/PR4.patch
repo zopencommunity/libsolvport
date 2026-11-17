@@ -1,5 +1,5 @@
 diff --git a/ext/testcase.c b/ext/testcase.c
-index af05c21..6e8cd85 100644
+index af05c21..a0d4761 100644
 --- a/ext/testcase.c
 +++ b/ext/testcase.c
 @@ -24,6 +24,15 @@
@@ -26,24 +26,39 @@ index af05c21..6e8cd85 100644
    Id *genid = 0;
    int ngenid = 0;
    Queue autoinstq;
-@@ -2239,7 +2249,15 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2239,7 +2249,18 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
        pieces[npieces] = 0;
        if (!strcmp(pieces[0], "repo") && npieces >= 4)
  	{
 -	  Repo *repo = repo_create(pool, pieces[1]);
 +	  Repo *repo = 0;
 +	  int is_extension = 0;
-+	  if (npieces > 4 && !strcmp(pieces[3], "filelists"))
++	  /* metadata types that extend an already loaded repo reusing its name */
++	  if (npieces > 4 && (!strcmp(pieces[3], "filelists")
++	      || !strcmp(pieces[3], "updateinfo") || !strcmp(pieces[3], "deltainfo")
++	      || !strcmp(pieces[3], "comps")))
 +	    {
 +	      repo = testcase_str2repo(pool, pieces[1]);
-+	      is_extension = 1;
++	      is_extension = !strcmp(pieces[3], "filelists");
 +	    }
 +	  if (!repo)
 +	    repo = repo_create(pool, pieces[1]);
  	  FILE *rfp;
  	  int prio, subprio;
  	  const char *rdata;
-@@ -2300,6 +2318,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2289,6 +2310,11 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+ 	      if (!rfp)
+ 		{
+ 		  pool_error(pool, 0, "testcase_read: could not open '%s'", rdata);
++		  /* fail (instead of skip) when metadata we know how to parse is missing */
++		  if (!strcmp(repotype, "rpmmd") || !strcmp(repotype, "filelists")
++		      || !strcmp(repotype, "updateinfo") || !strcmp(repotype, "deltainfo")
++		      || !strcmp(repotype, "comps"))
++		    parse_error = 1;
+ 		}
+ 	      else if (!strcmp(repotype, "testtags"))
+ 		{
+@@ -2300,6 +2326,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
  		  repo_add_solv(repo, rfp, 0);
  		  fclose(rfp);
  		}
@@ -99,7 +114,7 @@ index af05c21..6e8cd85 100644
  #if ENABLE_TESTCASE_HELIXREPO
  	      else if (!strcmp(repotype, "helix"))
  		{
-@@ -2654,7 +2721,14 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2654,7 +2729,14 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
      }
    if (closefp)
      fclose(fp);
@@ -116,28 +131,41 @@ index af05c21..6e8cd85 100644
        solver_free(solv);
        solv = 0;
 diff --git a/test/runtestcases.sh b/test/runtestcases.sh
-index 22b9166..a22b7ad 100755
+index 22b9166..58aa435 100755
 --- a/test/runtestcases.sh
 +++ b/test/runtestcases.sh
-@@ -8,6 +8,18 @@ if test -z "$cmd" -o -z "$dir"; then
+@@ -8,9 +8,29 @@ if test -z "$cmd" -o -z "$dir"; then
    exit 1
  fi
  
-+for xml in $(find $dir -name \*.xml 2>/dev/null); do
-+  if ! test -f "$xml.gz"; then
-+    gzip -c -9 "$xml" > "$xml.gz.tmp" && mv "$xml.gz.tmp" "$xml.gz" || rm -f "$xml.gz.tmp"
-+  fi
-+  if ! test -f "$xml.bz2"; then
-+    bzip2 -c -9 "$xml" > "$xml.bz2.tmp" && mv "$xml.bz2.tmp" "$xml.bz2" || rm -f "$xml.bz2.tmp"
-+  fi
-+  if ! test -f "$xml.zst"; then
-+    zstd -c -19 "$xml" > "$xml.zst.tmp" 2>/dev/null && mv "$xml.zst.tmp" "$xml.zst" || rm -f "$xml.zst.tmp"
-+  fi
++# Generate compressed fixtures for the XML files referenced with a
++# compressed extension by the testcase files.  Generation is atomic
++# (tmp + mv) so a failing compressor cannot leave a cached empty or
++# corrupt fixture behind.  Only plain find/sed are used here as this
++# also has to work with the USS tools in restricted environments.
++for tc in $(find "$dir" -name '*.t'); do
++  sed -n 's/^repo [^ ]* [^ ]* [^ ]* \(.*\.xml\)\.\(gz\|bz2\|zst\)$/\1|\2/p' "$tc"
++done | sort -u \
++  | while IFS='|' read -r xml ext; do
++  xml="$dir/$xml"
++  test -f "$xml" || continue
++  z="$xml.$ext"
++  test -f "$z" && continue
++  case "$ext" in
++    gz)   gzip -c -9 "$xml" >"$z.tmp" && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++    bz2)  bzip2 -c -9 "$xml" >"$z.tmp" && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++    zst)  zstd -c -19 "$xml" >"$z.tmp" 2>/dev/null && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++  esac
 +done
 +
  ex=0
- for tc in $(find $dir -name \*.t | sort) ; do
-   $cmd $tc >/dev/null
+-for tc in $(find $dir -name \*.t | sort) ; do
+-  $cmd $tc >/dev/null
++for tc in $(find "$dir" -name \*.t | sort) ; do
++  "$cmd" "$tc" >/dev/null
+   tex=$?
+   tcn="${tc#$dir/} .................................................."
+   tcn="${tcn:0:50}"
 diff --git a/test/testcases/compressed/comps.xml b/test/testcases/compressed/comps.xml
 new file mode 100644
 index 0000000..a301221
