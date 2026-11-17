@@ -1,11 +1,38 @@
 diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
-index 22b11a4..e536176 100644
+index 22b11a4..955292c 100644
 --- a/ext/solv_xfopen.c
 +++ b/ext/solv_xfopen.c
-@@ -32,6 +32,121 @@ static const char *binmode(const char *mode) {
+@@ -32,6 +32,148 @@ static const char *binmode(const char *mode) {
  
  #ifndef WITHOUT_COOKIEOPEN
  
++#include <fcntl.h>
++
++/*
++ * Duplicate fd preserving the source descriptor's close-on-exec flag:
++ * plain dup() clears FD_CLOEXEC, which would undo protection applied
++ * by callers before handing us the descriptor.
++ */
++static int solv_dup_cloexec(int fd)
++{
++  int nfd;
++#ifdef F_DUPFD_CLOEXEC
++  nfd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++  if (nfd >= 0)
++    return nfd;
++  if (errno != EINVAL)		/* only fall back if unsupported */
++    return -1;
++#endif
++  nfd = dup(fd);
++  if (nfd >= 0)
++    {
++      int flags = fcntl(fd, F_GETFD);
++      if (flags >= 0 && (flags & FD_CLOEXEC))
++	fcntl(nfd, F_SETFD, FD_CLOEXEC);
++    }
++  return nfd;
++}
++
 +#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE) && (defined(__MVS__) || !defined(_WIN32))
 +#include <pthread.h>
 +#include <unistd.h>
@@ -124,7 +151,7 @@ index 22b11a4..e536176 100644
  FILE *solv_cookieopen(void *cookie, const char *mode,
  	ssize_t (*cread)(void *, char *, size_t),
  	ssize_t (*cwrite)(void *, const char *, size_t),
-@@ -58,6 +173,69 @@ FILE *solv_cookieopen(void *cookie, const char *mode,
+@@ -58,6 +200,71 @@ FILE *solv_cookieopen(void *cookie, const char *mode,
      cio.write = cwrite;
    cio.close = cclose;
    return  fopencookie(cookie, *mode == 'w' ? "w" : "r", cio);
@@ -180,12 +207,14 @@ index 22b11a4..e536176 100644
 +  pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN > 262144 ? PTHREAD_STACK_MIN : 262144);
 +#endif
 +
-+  if (pthread_create(&thr, &attr, solv_cookie_worker, arg) != 0)
++  int pthr = pthread_create(&thr, &attr, solv_cookie_worker, arg);
++  if (pthr != 0)
 +    {
 +      pthread_attr_destroy(&attr);
 +      fclose(fp);
 +      close(pfd[1]);
 +      solv_free(arg);
++      errno = pthr;	/* pthread_create returns the error, does not set errno */
 +      return 0; /* Keep cookie caller-owned on failure */
 +    }
 +  pthread_attr_destroy(&attr);
@@ -194,7 +223,7 @@ index 22b11a4..e536176 100644
  #else
  # error Need to implement custom I/O
  #endif
-@@ -96,13 +274,31 @@ static int cookie_gzclose(void *cookie)
+@@ -96,13 +303,31 @@ static int cookie_gzclose(void *cookie)
  static inline FILE *mygzfopen(const char *fn, const char *mode)
  {
    gzFile gzf = gzopen(fn, mode);
@@ -209,7 +238,7 @@ index 22b11a4..e536176 100644
  {
 -  gzFile gzf = gzdopen(fd, mode);
 -  return solv_cookieopen(gzf, mode, cookie_gzread, cookie_gzwrite, cookie_gzclose);
-+  int dupfd = dup(fd);
++  int dupfd = solv_dup_cloexec(fd);
 +  if (dupfd < 0)
 +    return 0;
 +  gzFile gzf = gzdopen(dupfd, mode);
@@ -229,7 +258,7 @@ index 22b11a4..e536176 100644
  }
  
  #endif
-@@ -133,13 +329,31 @@ static int cookie_bzclose(void *cookie)
+@@ -133,13 +358,31 @@ static int cookie_bzclose(void *cookie)
  static inline FILE *mybzfopen(const char *fn, const char *mode)
  {
    BZFILE *bzf = BZ2_bzopen(fn, mode);
@@ -244,7 +273,7 @@ index 22b11a4..e536176 100644
  {
 -  BZFILE *bzf = BZ2_bzdopen(fd, mode);
 -  return solv_cookieopen(bzf, mode, cookie_bzread, cookie_bzwrite, cookie_bzclose);
-+  int dupfd = dup(fd);
++  int dupfd = solv_dup_cloexec(fd);
 +  if (dupfd < 0)
 +    return 0;
 +  BZFILE *bzf = BZ2_bzdopen(dupfd, mode);
@@ -264,7 +293,7 @@ index 22b11a4..e536176 100644
  }
  
  #endif
-@@ -315,25 +529,61 @@ static ssize_t lzwrite(void *cookie, const char *buf, size_t len)
+@@ -315,25 +558,61 @@ static ssize_t lzwrite(void *cookie, const char *buf, size_t len)
  static inline FILE *myxzfopen(const char *fn, const char *mode)
  {
    LZFILE *lzf = lzopen(fn, mode, -1, 1);
@@ -279,7 +308,7 @@ index 22b11a4..e536176 100644
  {
 -  LZFILE *lzf = lzopen(0, mode, fd, 1);
 -  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
-+  int dupfd = dup(fd);
++  int dupfd = solv_dup_cloexec(fd);
 +  if (dupfd < 0)
 +    return 0;
 +  LZFILE *lzf = lzopen(0, mode, dupfd, 1);
@@ -312,7 +341,7 @@ index 22b11a4..e536176 100644
  {
 -  LZFILE *lzf = lzopen(0, mode, fd, 0);
 -  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
-+  int dupfd = dup(fd);
++  int dupfd = solv_dup_cloexec(fd);
 +  if (dupfd < 0)
 +    return 0;
 +  LZFILE *lzf = lzopen(0, mode, dupfd, 0);
@@ -332,7 +361,7 @@ index 22b11a4..e536176 100644
  }
  
  #endif /* ENABLE_LZMA_COMPRESSION */
-@@ -517,13 +767,31 @@ static ssize_t zstdwrite(void *cookie, const char *buf, size_t len)
+@@ -517,13 +796,31 @@ static ssize_t zstdwrite(void *cookie, const char *buf, size_t len)
  static inline FILE *myzstdfopen(const char *fn, const char *mode)
  {
    ZSTDFILE *zstdfile = zstdopen(fn, mode, -1);
@@ -347,7 +376,7 @@ index 22b11a4..e536176 100644
  {
 -  ZSTDFILE *zstdfile = zstdopen(0, mode, fd);
 -  return solv_cookieopen(zstdfile, mode, zstdread, zstdwrite, zstdclose);
-+  int dupfd = dup(fd);
++  int dupfd = solv_dup_cloexec(fd);
 +  if (dupfd < 0)
 +    return 0;
 +  ZSTDFILE *zstdfile = zstdopen(0, mode, dupfd);
@@ -367,7 +396,7 @@ index 22b11a4..e536176 100644
  }
  
  #endif
-@@ -678,6 +946,16 @@ solv_xfopen(const char *fn, const char *mode)
+@@ -678,6 +975,16 @@ solv_xfopen(const char *fn, const char *mode)
    if (!mode)
      mode = "r";
    suf = strrchr(fn, '.');
@@ -384,7 +413,7 @@ index 22b11a4..e536176 100644
  #ifdef ENABLE_ZLIB_COMPRESSION
    if (suf && !strcmp(suf, ".gz"))
      return mygzfopen(fn, mode);
-@@ -769,6 +1047,16 @@ solv_xfopen_fd(const char *fn, int fd, const char *mode)
+@@ -769,6 +1076,16 @@ solv_xfopen_fd(const char *fn, int fd, const char *mode)
        else
  	mode = simplemode = "r";
      }
@@ -401,7 +430,7 @@ index 22b11a4..e536176 100644
  #ifdef ENABLE_ZLIB_COMPRESSION
    if (suf && !strcmp(suf, ".gz"))
      return mygzfdopen(fd, simplemode);
-@@ -919,6 +1207,22 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+@@ -919,6 +1236,22 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
    FILE *fp;
    if (*mode != 'r' && *mode != 'w')
      return 0;
@@ -424,7 +453,7 @@ index 22b11a4..e536176 100644
    bc = solv_calloc(1, sizeof(*bc));
    bc->freemem = 0;
    bc->bufp = bufp;
-@@ -934,9 +1238,9 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+@@ -934,9 +1267,9 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
        (*bc->bufp)[0] = 0;
        *bc->buflp = 0;
      }
@@ -435,7 +464,7 @@ index 22b11a4..e536176 100644
    if (!fp)
      {
        if (*mode == 'w')
-@@ -944,6 +1248,7 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+@@ -944,6 +1277,7 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
        cookie_bufclose(bc);
      }
    return fp;
@@ -443,7 +472,7 @@ index 22b11a4..e536176 100644
  }
  
  FILE *
-@@ -953,17 +1258,27 @@ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+@@ -953,17 +1287,27 @@ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
    FILE *fp;
    if (*mode != 'r')
      return 0;
