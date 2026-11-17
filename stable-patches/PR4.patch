@@ -1,5 +1,5 @@
 diff --git a/ext/testcase.c b/ext/testcase.c
-index af05c21..6389e75 100644
+index af05c21..6e8cd85 100644
 --- a/ext/testcase.c
 +++ b/ext/testcase.c
 @@ -24,6 +24,15 @@
@@ -18,7 +18,15 @@ index af05c21..6389e75 100644
  #if ENABLE_TESTCASE_HELIXREPO
  #include "ext/repo_helix.h"
  #endif
-@@ -2239,7 +2248,15 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2160,6 +2169,7 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+   int closefp = !fp;
+   int poolflagsreset = 0;
+   int missing_features = 0;
++  int parse_error = 0;
+   Id *genid = 0;
+   int ngenid = 0;
+   Queue autoinstq;
+@@ -2239,7 +2249,15 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
        pieces[npieces] = 0;
        if (!strcmp(pieces[0], "repo") && npieces >= 4)
  	{
@@ -35,7 +43,7 @@ index af05c21..6389e75 100644
  	  FILE *rfp;
  	  int prio, subprio;
  	  const char *rdata;
-@@ -2300,6 +2317,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+@@ -2300,6 +2318,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
  		  repo_add_solv(repo, rfp, 0);
  		  fclose(rfp);
  		}
@@ -48,7 +56,7 @@ index af05c21..6389e75 100644
 +		  if (err)
 +		    {
 +		      pool_error(pool, 0, "testcase_read: repo_add_rpmmd failed for %s", rdata);
-+		      missing_features = 1;
++		      parse_error = 1;
 +		      continue;
 +		    }
 +		}
@@ -59,7 +67,7 @@ index af05c21..6389e75 100644
 +		  if (err)
 +		    {
 +		      pool_error(pool, 0, "testcase_read: repo_add_updateinfoxml failed for %s", rdata);
-+		      missing_features = 1;
++		      parse_error = 1;
 +		      continue;
 +		    }
 +		}
@@ -70,7 +78,7 @@ index af05c21..6389e75 100644
 +		  if (err)
 +		    {
 +		      pool_error(pool, 0, "testcase_read: repo_add_deltainfoxml failed for %s", rdata);
-+		      missing_features = 1;
++		      parse_error = 1;
 +		      continue;
 +		    }
 +		}
@@ -83,7 +91,7 @@ index af05c21..6389e75 100644
 +		  if (err)
 +		    {
 +		      pool_error(pool, 0, "testcase_read: repo_add_comps failed for %s", rdata);
-+		      missing_features = 1;
++		      parse_error = 1;
 +		      continue;
 +		    }
 +		}
@@ -91,6 +99,22 @@ index af05c21..6389e75 100644
  #if ENABLE_TESTCASE_HELIXREPO
  	      else if (!strcmp(repotype, "helix"))
  		{
+@@ -2654,7 +2721,14 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+     }
+   if (closefp)
+     fclose(fp);
+-  if (missing_features)
++  if (parse_error)
++    {
++      solver_free(solv);
++      solv = 0;
++      if (resultflagsp)
++	*resultflagsp = 0;
++    }
++  else if (missing_features)
+     {
+       solver_free(solv);
+       solv = 0;
 diff --git a/test/runtestcases.sh b/test/runtestcases.sh
 index 22b9166..a22b7ad 100755
 --- a/test/runtestcases.sh
