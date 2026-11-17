@@ -1,5 +1,5 @@
 diff --git a/ext/testcase.c b/ext/testcase.c
-index af05c21..a0d4761 100644
+index af05c21..b3cc3f4 100644
 --- a/ext/testcase.c
 +++ b/ext/testcase.c
 @@ -24,6 +24,15 @@
@@ -18,6 +18,15 @@ index af05c21..a0d4761 100644
  #if ENABLE_TESTCASE_HELIXREPO
  #include "ext/repo_helix.h"
  #endif
+@@ -1783,7 +1792,7 @@ testcase_write_mangled(Solver *solv, const char *dir, int resultflags, const cha
+ 	sprintf(priobuf, "%d.%d", repo->priority, repo->subpriority);
+       else
+ 	sprintf(priobuf, "%d", repo->priority);
+-#if !defined(WITHOUT_COOKIEOPEN) && defined(ENABLE_ZLIB_COMPRESSION)
++#if !defined(WITHOUT_COOKIEOPEN) && defined(ENABLE_ZLIB_COMPRESSION) && (defined(HAVE_FUNOPEN) || defined(HAVE_FOPENCOOKIE))
+       out = pool_tmpjoin(pool, name, ".repo", ".gz");
+ #else
+       out = pool_tmpjoin(pool, name, ".repo", 0);
 @@ -2160,6 +2169,7 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
    int closefp = !fp;
    int poolflagsreset = 0;
