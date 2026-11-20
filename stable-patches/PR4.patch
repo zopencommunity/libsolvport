@@ -1,0 +1,477 @@
+diff --git a/ext/testcase.c b/ext/testcase.c
+index af05c21..b3cc3f4 100644
+--- a/ext/testcase.c
++++ b/ext/testcase.c
+@@ -24,6 +24,15 @@
+ #include "testcase.h"
+ #include "selection.h"
+ #include "solv_xfopen.h"
++#ifdef ENABLE_RPMMD
++#include "repo_rpmmd.h"
++#include "repo_repomdxml.h"
++#include "repo_updateinfoxml.h"
++#include "repo_deltainfoxml.h"
++#endif
++#ifdef ENABLE_COMPS
++#include "repo_comps.h"
++#endif
+ #if ENABLE_TESTCASE_HELIXREPO
+ #include "ext/repo_helix.h"
+ #endif
+@@ -1783,7 +1792,7 @@ testcase_write_mangled(Solver *solv, const char *dir, int resultflags, const cha
+ 	sprintf(priobuf, "%d.%d", repo->priority, repo->subpriority);
+       else
+ 	sprintf(priobuf, "%d", repo->priority);
+-#if !defined(WITHOUT_COOKIEOPEN) && defined(ENABLE_ZLIB_COMPRESSION)
++#if !defined(WITHOUT_COOKIEOPEN) && defined(ENABLE_ZLIB_COMPRESSION) && (defined(HAVE_FUNOPEN) || defined(HAVE_FOPENCOOKIE))
+       out = pool_tmpjoin(pool, name, ".repo", ".gz");
+ #else
+       out = pool_tmpjoin(pool, name, ".repo", 0);
+@@ -2160,6 +2169,7 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+   int closefp = !fp;
+   int poolflagsreset = 0;
+   int missing_features = 0;
++  int parse_error = 0;
+   Id *genid = 0;
+   int ngenid = 0;
+   Queue autoinstq;
+@@ -2239,7 +2249,18 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+       pieces[npieces] = 0;
+       if (!strcmp(pieces[0], "repo") && npieces >= 4)
+ 	{
+-	  Repo *repo = repo_create(pool, pieces[1]);
++	  Repo *repo = 0;
++	  int is_extension = 0;
++	  /* metadata types that extend an already loaded repo reusing its name */
++	  if (npieces > 4 && (!strcmp(pieces[3], "filelists")
++	      || !strcmp(pieces[3], "updateinfo") || !strcmp(pieces[3], "deltainfo")
++	      || !strcmp(pieces[3], "comps")))
++	    {
++	      repo = testcase_str2repo(pool, pieces[1]);
++	      is_extension = !strcmp(pieces[3], "filelists");
++	    }
++	  if (!repo)
++	    repo = repo_create(pool, pieces[1]);
+ 	  FILE *rfp;
+ 	  int prio, subprio;
+ 	  const char *rdata;
+@@ -2289,6 +2310,11 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+ 	      if (!rfp)
+ 		{
+ 		  pool_error(pool, 0, "testcase_read: could not open '%s'", rdata);
++		  /* fail (instead of skip) when metadata we know how to parse is missing */
++		  if (!strcmp(repotype, "rpmmd") || !strcmp(repotype, "filelists")
++		      || !strcmp(repotype, "updateinfo") || !strcmp(repotype, "deltainfo")
++		      || !strcmp(repotype, "comps"))
++		    parse_error = 1;
+ 		}
+ 	      else if (!strcmp(repotype, "testtags"))
+ 		{
+@@ -2300,6 +2326,55 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+ 		  repo_add_solv(repo, rfp, 0);
+ 		  fclose(rfp);
+ 		}
++#ifdef ENABLE_RPMMD
++	      else if (!strcmp(repotype, "rpmmd") || !strcmp(repotype, "filelists"))
++		{
++		  int flags = is_extension ? (REPO_EXTEND_SOLVABLES | REPO_LOCALPOOL) : 0;
++		  int err = repo_add_rpmmd(repo, rfp, 0, flags);
++		  fclose(rfp);
++		  if (err)
++		    {
++		      pool_error(pool, 0, "testcase_read: repo_add_rpmmd failed for %s", rdata);
++		      parse_error = 1;
++		      continue;
++		    }
++		}
++	      else if (!strcmp(repotype, "updateinfo"))
++		{
++		  int err = repo_add_updateinfoxml(repo, rfp, 0);
++		  fclose(rfp);
++		  if (err)
++		    {
++		      pool_error(pool, 0, "testcase_read: repo_add_updateinfoxml failed for %s", rdata);
++		      parse_error = 1;
++		      continue;
++		    }
++		}
++	      else if (!strcmp(repotype, "deltainfo"))
++		{
++		  int err = repo_add_deltainfoxml(repo, rfp, 0);
++		  fclose(rfp);
++		  if (err)
++		    {
++		      pool_error(pool, 0, "testcase_read: repo_add_deltainfoxml failed for %s", rdata);
++		      parse_error = 1;
++		      continue;
++		    }
++		}
++#endif
++#ifdef ENABLE_COMPS
++	      else if (!strcmp(repotype, "comps"))
++		{
++		  int err = repo_add_comps(repo, rfp, 0);
++		  fclose(rfp);
++		  if (err)
++		    {
++		      pool_error(pool, 0, "testcase_read: repo_add_comps failed for %s", rdata);
++		      parse_error = 1;
++		      continue;
++		    }
++		}
++#endif
+ #if ENABLE_TESTCASE_HELIXREPO
+ 	      else if (!strcmp(repotype, "helix"))
+ 		{
+@@ -2654,7 +2729,14 @@ testcase_read(Pool *pool, FILE *fp, const char *testcase, Queue *job, char **res
+     }
+   if (closefp)
+     fclose(fp);
+-  if (missing_features)
++  if (parse_error)
++    {
++      solver_free(solv);
++      solv = 0;
++      if (resultflagsp)
++	*resultflagsp = 0;
++    }
++  else if (missing_features)
+     {
+       solver_free(solv);
+       solv = 0;
+diff --git a/test/runtestcases.sh b/test/runtestcases.sh
+index 22b9166..58aa435 100755
+--- a/test/runtestcases.sh
++++ b/test/runtestcases.sh
+@@ -8,9 +8,29 @@ if test -z "$cmd" -o -z "$dir"; then
+   exit 1
+ fi
+ 
++# Generate compressed fixtures for the XML files referenced with a
++# compressed extension by the testcase files.  Generation is atomic
++# (tmp + mv) so a failing compressor cannot leave a cached empty or
++# corrupt fixture behind.  Only plain find/sed are used here as this
++# also has to work with the USS tools in restricted environments.
++for tc in $(find "$dir" -name '*.t'); do
++  sed -n 's/^repo [^ ]* [^ ]* [^ ]* \(.*\.xml\)\.\(gz\|bz2\|zst\)$/\1|\2/p' "$tc"
++done | sort -u \
++  | while IFS='|' read -r xml ext; do
++  xml="$dir/$xml"
++  test -f "$xml" || continue
++  z="$xml.$ext"
++  test -f "$z" && continue
++  case "$ext" in
++    gz)   gzip -c -9 "$xml" >"$z.tmp" && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++    bz2)  bzip2 -c -9 "$xml" >"$z.tmp" && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++    zst)  zstd -c -19 "$xml" >"$z.tmp" 2>/dev/null && mv "$z.tmp" "$z" || rm -f "$z.tmp" ;;
++  esac
++done
++
+ ex=0
+-for tc in $(find $dir -name \*.t | sort) ; do
+-  $cmd $tc >/dev/null
++for tc in $(find "$dir" -name \*.t | sort) ; do
++  "$cmd" "$tc" >/dev/null
+   tex=$?
+   tcn="${tc#$dir/} .................................................."
+   tcn="${tcn:0:50}"
+diff --git a/test/testcases/compressed/comps.xml b/test/testcases/compressed/comps.xml
+new file mode 100644
+index 0000000..a301221
+--- /dev/null
++++ b/test/testcases/compressed/comps.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE comps PUBLIC "-//Red Hat, Inc.//DTD Comps info//EN" "comps.dtd">
++<comps>
++  <group>
++    <id>sample-group</id>
++    <name>Sample Package Group</name>
++    <description>Group containing sample packages</description>
++    <default>true</default>
++    <packagelist>
++      <packagereq type="mandatory">pkg-alpha</packagereq>
++      <packagereq type="default">pkg-beta</packagereq>
++    </packagelist>
++  </group>
++</comps>
+diff --git a/test/testcases/compressed/deltainfo.xml b/test/testcases/compressed/deltainfo.xml
+new file mode 100644
+index 0000000..a9efc5e
+--- /dev/null
++++ b/test/testcases/compressed/deltainfo.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<deltainfo>
++  <newpackage name="pkg-alpha" epoch="0" version="1.2.4" release="1" arch="x86_64">
++    <delta oldepoch="0" oldversion="1.2.3" oldrelease="1">
++      <checksum type="sha256">1111111111111111111111111111111111111111111111111111111111111111</checksum>
++      <filename>pkg-alpha-1.2.3-1_1.2.4-1.x86_64.drpm</filename>
++      <size>2048</size>
++    </delta>
++  </newpackage>
++</deltainfo>
+diff --git a/test/testcases/compressed/filelists.xml b/test/testcases/compressed/filelists.xml
+new file mode 100644
+index 0000000..4916888
+--- /dev/null
++++ b/test/testcases/compressed/filelists.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<filelists xmlns="http://linux.duke.edu/metadata/filelists" packages="2">
++  <package pkgid="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" name="pkg-alpha" arch="x86_64">
++    <version epoch="0" ver="1.2.3" rel="1"/>
++    <file>/usr/bin/alpha-tool</file>
++    <file>/usr/lib64/libalpha.so.1</file>
++    <file type="dir">/etc/pkg-alpha</file>
++  </package>
++  <package pkgid="ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb" name="pkg-beta" arch="x86_64">
++    <version epoch="0" ver="2.4.0" rel="1"/>
++    <file>/usr/lib64/libbeta.so.2</file>
++    <file type="dir">/etc/pkg-beta</file>
++  </package>
++</filelists>
+diff --git a/test/testcases/compressed/primary.xml b/test/testcases/compressed/primary.xml
+new file mode 100644
+index 0000000..8fb891f
+--- /dev/null
++++ b/test/testcases/compressed/primary.xml
+@@ -0,0 +1,50 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="3">
++  <package type="rpm">
++    <name>pkg-alpha</name>
++    <arch>x86_64</arch>
++    <version epoch="0" ver="1.2.3" rel="1"/>
++    <checksum type="sha256" pkgid="YES">e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</checksum>
++    <summary>Sample package alpha</summary>
++    <description>Sample alpha package with dependency on beta library.</description>
++    <format>
++      <rpm:provides>
++        <rpm:entry name="pkg-alpha" flags="EQ" epoch="0" ver="1.2.3" rel="1"/>
++        <rpm:entry name="libalpha.so.1()(64bit)"/>
++      </rpm:provides>
++      <rpm:requires>
++        <rpm:entry name="pkg-beta" flags="GE" epoch="0" ver="2.0.0"/>
++      </rpm:requires>
++    </format>
++  </package>
++  <package type="rpm">
++    <name>pkg-beta</name>
++    <arch>x86_64</arch>
++    <version epoch="0" ver="2.4.0" rel="1"/>
++    <checksum type="sha256" pkgid="YES">ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb</checksum>
++    <summary>Sample library beta</summary>
++    <description>Shared core library required by sample package alpha.</description>
++    <format>
++      <rpm:provides>
++        <rpm:entry name="pkg-beta" flags="EQ" epoch="0" ver="2.4.0" rel="1"/>
++        <rpm:entry name="libbeta.so.2()(64bit)"/>
++      </rpm:provides>
++    </format>
++  </package>
++  <package type="rpm">
++    <name>pkg-gamma</name>
++    <arch>x86_64</arch>
++    <version epoch="0" ver="3.0.0" rel="1"/>
++    <checksum type="sha256" pkgid="YES">ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad</checksum>
++    <summary>Sample tool gamma</summary>
++    <description>Application requiring file provided by alpha package.</description>
++    <format>
++      <rpm:provides>
++        <rpm:entry name="pkg-gamma" flags="EQ" epoch="0" ver="3.0.0" rel="1"/>
++      </rpm:provides>
++      <rpm:requires>
++        <rpm:entry name="/usr/bin/alpha-tool"/>
++      </rpm:requires>
++    </format>
++  </package>
++</metadata>
+diff --git a/test/testcases/compressed/test_comps_bz2.t b/test/testcases/compressed/test_comps_bz2.t
+new file mode 100644
+index 0000000..ee7f72f
+--- /dev/null
++++ b/test/testcases/compressed/test_comps_bz2.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 comps comps.xml.bz2
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_comps_gz.t b/test/testcases/compressed/test_comps_gz.t
+new file mode 100644
+index 0000000..bd48c2b
+--- /dev/null
++++ b/test/testcases/compressed/test_comps_gz.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 comps comps.xml.gz
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_deltainfo_bz2.t b/test/testcases/compressed/test_deltainfo_bz2.t
+new file mode 100644
+index 0000000..80494f0
+--- /dev/null
++++ b/test/testcases/compressed/test_deltainfo_bz2.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 deltainfo deltainfo.xml.bz2
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_deltainfo_gz.t b/test/testcases/compressed/test_deltainfo_gz.t
+new file mode 100644
+index 0000000..e17a261
+--- /dev/null
++++ b/test/testcases/compressed/test_deltainfo_gz.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 deltainfo deltainfo.xml.gz
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_filelists_gz.t b/test/testcases/compressed/test_filelists_gz.t
+new file mode 100644
+index 0000000..20e8d7b
+--- /dev/null
++++ b/test/testcases/compressed/test_filelists_gz.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 filelists filelists.xml.gz
++system x86_64 rpm system
++job install selection /usr/lib64/libalpha.so.1 filelist
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_filelists_zst.t b/test/testcases/compressed/test_filelists_zst.t
+new file mode 100644
+index 0000000..ae52386
+--- /dev/null
++++ b/test/testcases/compressed/test_filelists_zst.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 filelists filelists.xml.zst
++system x86_64 rpm system
++job install selection /usr/lib64/libalpha.so.1 filelist
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_primary_bz2.t b/test/testcases/compressed/test_primary_bz2.t
+new file mode 100644
+index 0000000..e77f7e1
+--- /dev/null
++++ b/test/testcases/compressed/test_primary_bz2.t
+@@ -0,0 +1,7 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml.bz2
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_primary_gz.t b/test/testcases/compressed/test_primary_gz.t
+new file mode 100644
+index 0000000..5ad6cbf
+--- /dev/null
++++ b/test/testcases/compressed/test_primary_gz.t
+@@ -0,0 +1,7 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml.gz
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_primary_plain.t b/test/testcases/compressed/test_primary_plain.t
+new file mode 100644
+index 0000000..e35cc16
+--- /dev/null
++++ b/test/testcases/compressed/test_primary_plain.t
+@@ -0,0 +1,7 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_primary_zst.t b/test/testcases/compressed/test_primary_zst.t
+new file mode 100644
+index 0000000..7f11a8f
+--- /dev/null
++++ b/test/testcases/compressed/test_primary_zst.t
+@@ -0,0 +1,7 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml.zst
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_updateinfo_gz.t b/test/testcases/compressed/test_updateinfo_gz.t
+new file mode 100644
+index 0000000..f2e01a4
+--- /dev/null
++++ b/test/testcases/compressed/test_updateinfo_gz.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 updateinfo updateinfo.xml.gz
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/test_updateinfo_zst.t b/test/testcases/compressed/test_updateinfo_zst.t
+new file mode 100644
+index 0000000..5c64d7e
+--- /dev/null
++++ b/test/testcases/compressed/test_updateinfo_zst.t
+@@ -0,0 +1,8 @@
++repo system 0 empty
++repo test 0 rpmmd primary.xml
++repo test 0 updateinfo updateinfo.xml.zst
++system x86_64 rpm system
++job install name pkg-alpha
++result transaction,problems <inline>
++#>install pkg-alpha-1.2.3-1.x86_64@test
++#>install pkg-beta-2.4.0-1.x86_64@test
+diff --git a/test/testcases/compressed/updateinfo.xml b/test/testcases/compressed/updateinfo.xml
+new file mode 100644
+index 0000000..d6483b7
+--- /dev/null
++++ b/test/testcases/compressed/updateinfo.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<updates>
++  <update type="security" status="stable" version="1.0" from="security@example.com">
++    <id>SAMPLE-2026-0001</id>
++    <title>Security Update for pkg-alpha</title>
++    <issued date="1700000000"/>
++    <references>
++      <reference href="https://example.com/cve/CVE-2026-0001" id="CVE-2026-0001" type="cve"/>
++    </references>
++    <pkglist>
++      <collection>
++        <package name="pkg-alpha" epoch="0" version="1.2.4" release="1" arch="x86_64">
++          <filename>pkg-alpha-1.2.4-1.x86_64.rpm</filename>
++        </package>
++      </collection>
++    </pkglist>
++  </update>
++</updates>

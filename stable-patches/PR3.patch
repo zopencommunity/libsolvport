@@ -1,0 +1,503 @@
+diff --git a/ext/solv_xfopen.c b/ext/solv_xfopen.c
+index 22b11a4..955292c 100644
+--- a/ext/solv_xfopen.c
++++ b/ext/solv_xfopen.c
+@@ -32,6 +32,148 @@ static const char *binmode(const char *mode) {
+ 
+ #ifndef WITHOUT_COOKIEOPEN
+ 
++#include <fcntl.h>
++
++/*
++ * Duplicate fd preserving the source descriptor's close-on-exec flag:
++ * plain dup() clears FD_CLOEXEC, which would undo protection applied
++ * by callers before handing us the descriptor.
++ */
++static int solv_dup_cloexec(int fd)
++{
++  int nfd;
++#ifdef F_DUPFD_CLOEXEC
++  nfd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++  if (nfd >= 0)
++    return nfd;
++  if (errno != EINVAL)		/* only fall back if unsupported */
++    return -1;
++#endif
++  nfd = dup(fd);
++  if (nfd >= 0)
++    {
++      int flags = fcntl(fd, F_GETFD);
++      if (flags >= 0 && (flags & FD_CLOEXEC))
++	fcntl(nfd, F_SETFD, FD_CLOEXEC);
++    }
++  return nfd;
++}
++
++#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE) && (defined(__MVS__) || !defined(_WIN32))
++#include <pthread.h>
++#include <unistd.h>
++#include <signal.h>
++#include <fcntl.h>
++#include <stdlib.h>	/* mkstemp */
++
++/*
++ * Pipe/worker fallback for platforms without fopencookie()/funopen()
++ * (e.g. z/OS). Read mode only; a detached worker thread streams decoded
++ * data from the cookie callbacks into a pipe that the caller reads as a
++ * regular FILE*.
++ *
++ * Known limitations (inherent to the pipe-based design, since a plain
++ * FILE* gives us no close/error hook):
++ *  - A codec read error ends the stream exactly like EOF, so the caller
++ *    sees short data rather than an ferror() failure.  Callers that parse
++ *    structured data (e.g. XML metadata) will still fail on truncation.
++ *  - fclose() on the returned FILE* does not wait for the worker; the
++ *    cookie close callback may run shortly after fclose() returns.
++ *  - Write/append modes are rejected upfront with ENOTSUP (see
++ *    solv_xfopen/solv_xfopen_fd) to avoid silently writing uncompressed
++ *    data or losing buffered output.
++ */
++struct solv_cookie_thread_arg {
++  int fd;                                         /* Worker's pipe write end */
++  void *cookie;                                   /* Codec cookie (gzFile, BZFILE*, etc.) */
++  ssize_t (*cread)(void *, char *, size_t);
++  ssize_t (*cwrite)(void *, const char *, size_t);
++  int (*cclose)(void *);
++};
++
++static void *solv_cookie_worker(void *data)
++{
++  struct solv_cookie_thread_arg *arg = (struct solv_cookie_thread_arg *)data;
++  sigset_t set;
++  char buf[32768];
++
++  /* Block SIGPIPE in worker thread */
++  sigemptyset(&set);
++  sigaddset(&set, SIGPIPE);
++  pthread_sigmask(SIG_BLOCK, &set, NULL);
++
++  for (;;)
++    {
++      errno = 0;
++      ssize_t n = arg->cread(arg->cookie, buf, sizeof(buf));
++      if (n < 0)
++        {
++          if (errno == EINTR)
++            continue;
++          break; /* Codec read error */
++        }
++      if (n == 0)
++        break; /* Clean EOF */
++
++      ssize_t off = 0;
++      while (off < n)
++        {
++          errno = 0;
++          ssize_t w = write(arg->fd, buf + off, n - off);
++          if (w < 0)
++            {
++              if (errno == EINTR)
++                continue;
++              goto out; /* Reader closed pipe early (e.g. EPIPE) or terminal error */
++            }
++          if (w == 0)
++            goto out;
++          off += w;
++        }
++    }
++
++out:
++  close(arg->fd);
++  if (arg->cclose)
++    arg->cclose(arg->cookie);
++  solv_free(arg);
++  return NULL;
++}
++
++/*
++ * Synchronous fallback for memory-backed streams (solv_fmemopen,
++ * solv_xfopen_buf read mode): copy the caller-owned buffer into an
++ * unlinked temp file and return a plain FILE* over it.  These must
++ * NOT use the pipe/worker fallback: a detached worker could call
++ * cookie_bufread() on caller-owned memory after the caller closed
++ * the stream and freed the buffer (use-after-free).
++ */
++static FILE *solv_memstream_open(const char *buf, size_t bufl)
++{
++  char template[] = "/tmp/solvmemXXXXXX";
++  int fd = mkstemp(template);
++  FILE *fp;
++  if (fd < 0)
++    return 0;
++  unlink(template);
++  /* "w+b" matches the O_RDWR descriptor mkstemp created; a plain "rb"
++     makes fwrite fail on strict fdopen implementations (z/OS). */
++  fp = fdopen(fd, "w+b");
++  if (!fp)
++    {
++      close(fd);
++      return 0;
++    }
++  if (bufl && buf && fwrite(buf, 1, bufl, fp) != bufl)
++    {
++      fclose(fp);
++      return 0;
++    }
++  rewind(fp);
++  return fp;
++}
++#endif
++
+ FILE *solv_cookieopen(void *cookie, const char *mode,
+ 	ssize_t (*cread)(void *, char *, size_t),
+ 	ssize_t (*cwrite)(void *, const char *, size_t),
+@@ -58,6 +200,71 @@ FILE *solv_cookieopen(void *cookie, const char *mode,
+     cio.write = cwrite;
+   cio.close = cclose;
+   return  fopencookie(cookie, *mode == 'w' ? "w" : "r", cio);
++#elif defined(__MVS__) || !defined(_WIN32)
++  int pfd[2];
++  pthread_t thr;
++  pthread_attr_t attr;
++  struct solv_cookie_thread_arg *arg;
++  FILE *fp;
++
++  if (!cookie)
++    return 0;
++
++  if (*mode != 'r')
++    {
++      errno = ENOTSUP;
++      return 0; /* Keep cookie caller-owned on failure */
++    }
++
++  if (pipe(pfd) < 0)
++    return 0; /* Keep cookie caller-owned on failure */
++  /* Mark both ends close-on-exec: an inherited write end would keep the
++   * read end from seeing EOF after a fork+exec while decompression runs. */
++  fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
++  fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
++
++  fp = fdopen(pfd[0], "rb");
++  if (!fp)
++    {
++      close(pfd[0]);
++      close(pfd[1]);
++      return 0; /* Keep cookie caller-owned on failure */
++    }
++
++  arg = (struct solv_cookie_thread_arg *)solv_malloc(sizeof(*arg));
++  if (!arg)
++    {
++      fclose(fp);
++      close(pfd[1]);
++      return 0; /* Keep cookie caller-owned on failure */
++    }
++
++  arg->cookie = cookie;
++  arg->cread = cread;
++  arg->cwrite = cwrite;
++  arg->cclose = cclose;
++  arg->fd = pfd[1];
++
++  pthread_attr_init(&attr);
++  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++
++#ifdef PTHREAD_STACK_MIN
++  pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN > 262144 ? PTHREAD_STACK_MIN : 262144);
++#endif
++
++  int pthr = pthread_create(&thr, &attr, solv_cookie_worker, arg);
++  if (pthr != 0)
++    {
++      pthread_attr_destroy(&attr);
++      fclose(fp);
++      close(pfd[1]);
++      solv_free(arg);
++      errno = pthr;	/* pthread_create returns the error, does not set errno */
++      return 0; /* Keep cookie caller-owned on failure */
++    }
++  pthread_attr_destroy(&attr);
++
++  return fp;
+ #else
+ # error Need to implement custom I/O
+ #endif
+@@ -96,13 +303,31 @@ static int cookie_gzclose(void *cookie)
+ static inline FILE *mygzfopen(const char *fn, const char *mode)
+ {
+   gzFile gzf = gzopen(fn, mode);
+-  return solv_cookieopen(gzf, mode, cookie_gzread, cookie_gzwrite, cookie_gzclose);
++  FILE *fp = solv_cookieopen(gzf, mode, cookie_gzread, cookie_gzwrite, cookie_gzclose);
++  if (!fp && gzf)
++    cookie_gzclose(gzf);
++  return fp;
+ }
+ 
+ static inline FILE *mygzfdopen(int fd, const char *mode)
+ {
+-  gzFile gzf = gzdopen(fd, mode);
+-  return solv_cookieopen(gzf, mode, cookie_gzread, cookie_gzwrite, cookie_gzclose);
++  int dupfd = solv_dup_cloexec(fd);
++  if (dupfd < 0)
++    return 0;
++  gzFile gzf = gzdopen(dupfd, mode);
++  if (!gzf)
++    {
++      close(dupfd);
++      return 0;
++    }
++  FILE *fp = solv_cookieopen(gzf, mode, cookie_gzread, cookie_gzwrite, cookie_gzclose);
++  if (!fp)
++    {
++      cookie_gzclose(gzf);
++      return 0;
++    }
++  close(fd);
++  return fp;
+ }
+ 
+ #endif
+@@ -133,13 +358,31 @@ static int cookie_bzclose(void *cookie)
+ static inline FILE *mybzfopen(const char *fn, const char *mode)
+ {
+   BZFILE *bzf = BZ2_bzopen(fn, mode);
+-  return solv_cookieopen(bzf, mode, cookie_bzread, cookie_bzwrite, cookie_bzclose);
++  FILE *fp = solv_cookieopen(bzf, mode, cookie_bzread, cookie_bzwrite, cookie_bzclose);
++  if (!fp && bzf)
++    cookie_bzclose(bzf);
++  return fp;
+ }
+ 
+ static inline FILE *mybzfdopen(int fd, const char *mode)
+ {
+-  BZFILE *bzf = BZ2_bzdopen(fd, mode);
+-  return solv_cookieopen(bzf, mode, cookie_bzread, cookie_bzwrite, cookie_bzclose);
++  int dupfd = solv_dup_cloexec(fd);
++  if (dupfd < 0)
++    return 0;
++  BZFILE *bzf = BZ2_bzdopen(dupfd, mode);
++  if (!bzf)
++    {
++      close(dupfd);
++      return 0;
++    }
++  FILE *fp = solv_cookieopen(bzf, mode, cookie_bzread, cookie_bzwrite, cookie_bzclose);
++  if (!fp)
++    {
++      cookie_bzclose(bzf);
++      return 0;
++    }
++  close(fd);
++  return fp;
+ }
+ 
+ #endif
+@@ -315,25 +558,61 @@ static ssize_t lzwrite(void *cookie, const char *buf, size_t len)
+ static inline FILE *myxzfopen(const char *fn, const char *mode)
+ {
+   LZFILE *lzf = lzopen(fn, mode, -1, 1);
+-  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  FILE *fp = solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  if (!fp && lzf)
++    lzclose(lzf);
++  return fp;
+ }
+ 
+ static inline FILE *myxzfdopen(int fd, const char *mode)
+ {
+-  LZFILE *lzf = lzopen(0, mode, fd, 1);
+-  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  int dupfd = solv_dup_cloexec(fd);
++  if (dupfd < 0)
++    return 0;
++  LZFILE *lzf = lzopen(0, mode, dupfd, 1);
++  if (!lzf)
++    {
++      close(dupfd);
++      return 0;
++    }
++  FILE *fp = solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  if (!fp)
++    {
++      lzclose(lzf);
++      return 0;
++    }
++  close(fd);
++  return fp;
+ }
+ 
+ static inline FILE *mylzfopen(const char *fn, const char *mode)
+ {
+   LZFILE *lzf = lzopen(fn, mode, -1, 0);
+-  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  FILE *fp = solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  if (!fp && lzf)
++    lzclose(lzf);
++  return fp;
+ }
+ 
+ static inline FILE *mylzfdopen(int fd, const char *mode)
+ {
+-  LZFILE *lzf = lzopen(0, mode, fd, 0);
+-  return solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  int dupfd = solv_dup_cloexec(fd);
++  if (dupfd < 0)
++    return 0;
++  LZFILE *lzf = lzopen(0, mode, dupfd, 0);
++  if (!lzf)
++    {
++      close(dupfd);
++      return 0;
++    }
++  FILE *fp = solv_cookieopen(lzf, mode, lzread, lzwrite, lzclose);
++  if (!fp)
++    {
++      lzclose(lzf);
++      return 0;
++    }
++  close(fd);
++  return fp;
+ }
+ 
+ #endif /* ENABLE_LZMA_COMPRESSION */
+@@ -517,13 +796,31 @@ static ssize_t zstdwrite(void *cookie, const char *buf, size_t len)
+ static inline FILE *myzstdfopen(const char *fn, const char *mode)
+ {
+   ZSTDFILE *zstdfile = zstdopen(fn, mode, -1);
+-  return solv_cookieopen(zstdfile, mode, zstdread, zstdwrite, zstdclose);
++  FILE *fp = solv_cookieopen(zstdfile, mode, zstdread, zstdwrite, zstdclose);
++  if (!fp && zstdfile)
++    zstdclose(zstdfile);
++  return fp;
+ }
+ 
+ static inline FILE *myzstdfdopen(int fd, const char *mode)
+ {
+-  ZSTDFILE *zstdfile = zstdopen(0, mode, fd);
+-  return solv_cookieopen(zstdfile, mode, zstdread, zstdwrite, zstdclose);
++  int dupfd = solv_dup_cloexec(fd);
++  if (dupfd < 0)
++    return 0;
++  ZSTDFILE *zstdfile = zstdopen(0, mode, dupfd);
++  if (!zstdfile)
++    {
++      close(dupfd);
++      return 0;
++    }
++  FILE *fp = solv_cookieopen(zstdfile, mode, zstdread, zstdwrite, zstdclose);
++  if (!fp)
++    {
++      zstdclose(zstdfile);
++      return 0;
++    }
++  close(fd);
++  return fp;
+ }
+ 
+ #endif
+@@ -678,6 +975,16 @@ solv_xfopen(const char *fn, const char *mode)
+   if (!mode)
+     mode = "r";
+   suf = strrchr(fn, '.');
++#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE)
++  if (suf && (*mode == 'w' || *mode == 'a' || strchr(mode, '+')))
++    {
++      if (!strcmp(suf, ".gz") || !strcmp(suf, ".bz2") || !strcmp(suf, ".xz") || !strcmp(suf, ".lzma") || !strcmp(suf, ".zst") || !strcmp(suf, ".zck"))
++	{
++	  errno = ENOTSUP;
++	  return 0;
++	}
++    }
++#endif
+ #ifdef ENABLE_ZLIB_COMPRESSION
+   if (suf && !strcmp(suf, ".gz"))
+     return mygzfopen(fn, mode);
+@@ -769,6 +1076,16 @@ solv_xfopen_fd(const char *fn, int fd, const char *mode)
+       else
+ 	mode = simplemode = "r";
+     }
++#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE)
++  if (suf && (*simplemode == 'w' || *simplemode == 'a' || strchr(simplemode, '+')))
++    {
++      if (!strcmp(suf, ".gz") || !strcmp(suf, ".bz2") || !strcmp(suf, ".xz") || !strcmp(suf, ".lzma") || !strcmp(suf, ".zst") || !strcmp(suf, ".zck"))
++	{
++	  errno = ENOTSUP;
++	  return 0;
++	}
++    }
++#endif
+ #ifdef ENABLE_ZLIB_COMPRESSION
+   if (suf && !strcmp(suf, ".gz"))
+     return mygzfdopen(fd, simplemode);
+@@ -919,6 +1236,22 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+   FILE *fp;
+   if (*mode != 'r' && *mode != 'w')
+     return 0;
++#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE)
++  /* Keep memory streams synchronous (see solv_memstream_open): the
++   * pipe/worker fallback must not touch caller-owned buffers. */
++  if (*mode == 'r')
++    {
++      size_t bl = buflp ? *buflp : strlen(*bufp);
++      fp = solv_memstream_open(*bufp, bl);
++      if (!fp)
++	return 0;
++      if (!strcmp(mode, "rf"))	/* auto-free: data was copied */
++	solv_free(*bufp);
++      return fp;
++    }
++  errno = ENOTSUP;			/* write mode needs cookie APIs */
++  return 0;
++#else
+   bc = solv_calloc(1, sizeof(*bc));
+   bc->freemem = 0;
+   bc->bufp = bufp;
+@@ -934,9 +1267,9 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+       (*bc->bufp)[0] = 0;
+       *bc->buflp = 0;
+     }
+-  fp = solv_cookieopen(bc, mode, cookie_bufread, cookie_bufwrite, cookie_bufclose);
+   if (!strcmp(mode, "rf"))	/* auto-free */
+     bc->freemem = *bufp;
++  fp = solv_cookieopen(bc, mode, cookie_bufread, cookie_bufwrite, cookie_bufclose);
+   if (!fp)
+     {
+       if (*mode == 'w')
+@@ -944,6 +1277,7 @@ solv_xfopen_buf(const char *fn, char **bufp, size_t *buflp, const char *mode)
+       cookie_bufclose(bc);
+     }
+   return fp;
++#endif
+ }
+ 
+ FILE *
+@@ -953,17 +1287,27 @@ solv_fmemopen(const char *buf, size_t bufl, const char *mode)
+   FILE *fp;
+   if (*mode != 'r')
+     return 0;
++#if !defined(HAVE_FUNOPEN) && !defined(HAVE_FOPENCOOKIE)
++  /* Synchronous temp-file copy; see solv_memstream_open. */
++  fp = solv_memstream_open(buf, bufl);
++  if (!fp)
++    return 0;
++  if (!strcmp(mode, "rf"))	/* auto-free: data was copied */
++    solv_free((char *)buf);
++  return fp;
++#else
+   bc = solv_calloc(1, sizeof(*bc));
+   bc->buf_int = (char *)buf;
+   bc->bufl_int = bufl;
+   bc->bufp = &bc->buf_int;
+   bc->buflp = &bc->bufl_int;
+-  fp = solv_cookieopen(bc, mode, cookie_bufread, cookie_bufwrite, cookie_bufclose);
+   if (!strcmp(mode, "rf"))	/* auto-free */
+     bc->freemem = bc->buf_int;
++  fp = solv_cookieopen(bc, mode, cookie_bufread, cookie_bufwrite, cookie_bufclose);
+   if (!fp)
+     cookie_bufclose(bc);
+   return fp;
++#endif
+ }
+ 
+ #else
